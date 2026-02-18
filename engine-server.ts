@@ -1,14 +1,22 @@
 /**
  * Intelligence Engine — Single-file server.
- * Runs on Bun, connects to PostgreSQL, serves at port 9877.
+ * Runs on Bun, connects to PostgreSQL + DragonflyDB, serves at port 9877.
  * Proxied by Caddy at /engine/*
  *
- * Architecture: noun-relation graph in PostgreSQL.
- * Everything connects to everything. Views determine shape.
- * The engine reads, reasons, writes back.
+ * Architecture: RTSG Phase Space (Relational Three-Space Geometry)
+ * - Concept spheres in 8D Riemannian manifold
+ * - Grothendieck topologies as cognitive filters
+ * - Sheaf sections for prediction (local→global)
+ * - Nerve complex for structural analysis
+ * - Compute router with 7 logic gates
+ * - DragonflyDB for working memory
+ * - Intelligence metrics (idiometrics)
+ *
+ * Agent zero is IN the system. Truth is local. The observer shapes the answer.
  */
 
 import pg from "pg";
+import Redis from "ioredis";
 
 // ============================================================
 // DATABASE LAYER
@@ -22,6 +30,37 @@ const pool = new pg.Pool({
   password: "musclemap",
   max: 5,
 });
+
+// ============================================================
+// DRAGONFLY (Redis-compatible) — WORKING MEMORY
+// ============================================================
+
+let redis: Redis | null = null;
+try {
+  redis = new Redis({ host: "127.0.0.1", port: 6379, maxRetriesPerRequest: 1, lazyConnect: true });
+  redis.connect().catch(() => { redis = null; console.log("[engine] DragonflyDB unavailable — running without cache"); });
+} catch (_) {
+  redis = null;
+  console.log("[engine] DragonflyDB unavailable — running without cache");
+}
+
+/** Cache get with fallback */
+async function cacheGet(key: string): Promise<string | null> {
+  if (!redis) return null;
+  try { return await redis.get(key); } catch (_) { return null; }
+}
+
+/** Cache set with TTL */
+async function cacheSet(key: string, value: string, ttlSeconds: number = 60): Promise<void> {
+  if (!redis) return;
+  try { await redis.set(key, value, "EX", ttlSeconds); } catch (_) {}
+}
+
+/** Cache delete */
+async function cacheDel(key: string): Promise<void> {
+  if (!redis) return;
+  try { await redis.del(key); } catch (_) {}
+}
 
 async function sql(text: string, params: any[] = []): Promise<any[]> {
   const result = await pool.query(text, params);
@@ -1381,6 +1420,914 @@ async function buildCloud(): Promise<any> {
 }
 
 // ============================================================
+// GROTHENDIECK FILTER SYSTEM
+// A filter is NOT a predicate that prunes — it's a covering
+// that defines what "truth" means in context. The Filter-Site
+// Correspondence: filters and topologies are the SAME object.
+// ============================================================
+
+interface FilterSpec {
+  /** Which dimensions to include (null = all) */
+  dimensions?: number[];
+  /** Minimum radius threshold per dimension */
+  min_radius?: Record<number, number>;
+  /** Minimum density threshold per dimension */
+  min_density?: Record<number, number>;
+  /** Minimum link_count for concepts */
+  min_links?: number;
+  /** Relation types to include (null = all) */
+  relation_types?: string[];
+  /** Noun types to include (null = all) */
+  noun_types?: string[];
+  /** Coherence threshold: min dimensions a concept must span */
+  coherence_threshold?: number;
+  /** Weight threshold for nerve simplices */
+  weight_threshold?: number;
+}
+
+/** Apply a filter spec to the knowledge graph, returning a filtered view */
+async function applyFilter(filterSpec: FilterSpec): Promise<any> {
+  const agentId = await getEngineAgentId();
+  const dims = filterSpec.dimensions || [1, 2, 3, 4, 5, 6, 7, 8];
+
+  // Get concepts in the specified dimensions
+  let conceptQuery = `
+    SELECT DISTINCT n.id, n.label, n.type, n.link_count, COALESCE(n.usage_count, 0) as usage_count,
+           array_agg(DISTINCT cs.dimension ORDER BY cs.dimension) as dims,
+           SUM(cs.radius) as total_radius, SUM(cs.density) as total_density
+    FROM concept_spheres cs
+    JOIN nouns n ON n.id = cs.noun_id
+    WHERE cs.agent_id = $1 AND cs.dimension = ANY($2)`;
+  const params: any[] = [agentId, dims];
+
+  conceptQuery += ` GROUP BY n.id, n.label, n.type, n.link_count, n.usage_count`;
+
+  // Apply link count filter
+  if (filterSpec.min_links) {
+    conceptQuery += ` HAVING n.link_count >= ${filterSpec.min_links}`;
+  }
+
+  conceptQuery += ` ORDER BY n.link_count DESC`;
+
+  let concepts = await sql(conceptQuery, params);
+
+  // Apply noun type filter
+  if (filterSpec.noun_types && filterSpec.noun_types.length > 0) {
+    concepts = concepts.filter((c: any) => filterSpec.noun_types!.includes(c.type));
+  }
+
+  // Apply coherence threshold
+  if (filterSpec.coherence_threshold) {
+    concepts = concepts.filter((c: any) => c.dims.length >= filterSpec.coherence_threshold!);
+  }
+
+  // Apply radius/density thresholds per dimension
+  if (filterSpec.min_radius || filterSpec.min_density) {
+    const filteredIds: number[] = [];
+    for (const c of concepts) {
+      let passes = true;
+      for (const dim of c.dims) {
+        const sphereRows = await sql(
+          `SELECT radius, density FROM concept_spheres WHERE noun_id = $1 AND agent_id = $2 AND dimension = $3`,
+          [c.id, agentId, dim]
+        );
+        if (sphereRows.length > 0) {
+          if (filterSpec.min_radius?.[dim] && sphereRows[0].radius < filterSpec.min_radius[dim]) passes = false;
+          if (filterSpec.min_density?.[dim] && sphereRows[0].density < filterSpec.min_density[dim]) passes = false;
+        }
+      }
+      if (passes) filteredIds.push(c.id);
+    }
+    concepts = concepts.filter((c: any) => filteredIds.includes(c.id));
+  }
+
+  // Get relations between surviving concepts
+  const conceptIds = concepts.map((c: any) => c.id);
+  let relations: any[] = [];
+  if (conceptIds.length > 0) {
+    let relQuery = `SELECT r.from_id, r.to_id, r.type, r.weight,
+                           nf.label as from_label, nt.label as to_label
+                    FROM relations r
+                    JOIN nouns nf ON nf.id = r.from_id
+                    JOIN nouns nt ON nt.id = r.to_id
+                    WHERE r.from_id = ANY($1) AND r.to_id = ANY($1)`;
+    const relParams: any[] = [conceptIds];
+    if (filterSpec.relation_types && filterSpec.relation_types.length > 0) {
+      relQuery += ` AND r.type = ANY($2)`;
+      relParams.push(filterSpec.relation_types);
+    }
+    relations = await sql(relQuery, relParams);
+  }
+
+  // Compute the induced Grothendieck topology J_F
+  // For each dimension, compute w_J(i) = fraction of concepts where dim i alone suffices
+  const topology: Record<number, number> = {};
+  for (const d of dims) {
+    const inDim = concepts.filter((c: any) => c.dims.includes(d));
+    const singleDim = inDim.filter((c: any) => c.dims.length === 1);
+    topology[d] = inDim.length > 0 ? singleDim.length / inDim.length : 0;
+  }
+
+  // Compute the kernel: what the filter kills
+  const allConcepts = await sql(
+    `SELECT DISTINCT n.label FROM concept_spheres cs JOIN nouns n ON n.id = cs.noun_id WHERE cs.agent_id = $1`,
+    [agentId]
+  );
+  const survivingLabels = new Set(concepts.map((c: any) => c.label));
+  const killed = allConcepts.filter((c: any) => !survivingLabels.has(c.label)).map((c: any) => c.label);
+
+  return {
+    filter_applied: filterSpec,
+    surviving_concepts: concepts.length,
+    killed_concepts: killed.length,
+    surviving_relations: relations.length,
+    concepts: concepts.map((c: any) => ({
+      label: c.label,
+      glyph: getGlyph(c.label, c.type),
+      type: c.type,
+      dimensions: c.dims,
+      link_count: c.link_count,
+      total_radius: Math.round(parseFloat(c.total_radius) * 100) / 100,
+      total_density: Math.round(parseFloat(c.total_density) * 100) / 100,
+    })),
+    relations: relations.map((r: any) => ({
+      from: r.from_label,
+      to: r.to_label,
+      type: r.type,
+      weight: r.weight,
+    })),
+    kernel: killed,
+    induced_topology: topology,
+    ideagram: `🔬 [${dims.map(d => DIMENSIONS[d]?.glyph).join("")}] ${concepts.length}/${allConcepts.length} survive`,
+  };
+}
+
+/** Hypothetical: what would the graph look like if we removed a concept? */
+async function hypotheticalRemoval(nounLabel: string): Promise<any> {
+  const noun = await findNoun(nounLabel);
+  if (!noun) return null;
+
+  // Get all relations involving this noun
+  const relations = await getNeighbors(noun.id);
+
+  // Check sheaf coherence without this concept
+  const agentId = await getEngineAgentId();
+  const affectedDims = await sql(
+    `SELECT dimension FROM concept_spheres WHERE noun_id = $1 AND agent_id = $2`,
+    [noun.id, agentId]
+  );
+
+  // For each dimension this concept lives in, check if removing it breaks coherence
+  const breakages: any[] = [];
+  for (const dim of affectedDims) {
+    // Count concepts remaining in this dimension
+    const remaining = await sql(
+      `SELECT COUNT(*) as count FROM concept_spheres WHERE dimension = $1 AND agent_id = $2 AND noun_id != $3`,
+      [dim.dimension, agentId, noun.id]
+    );
+    if (parseInt(remaining[0].count) === 0) {
+      breakages.push({
+        dimension: dim.dimension,
+        name: DIMENSIONS[dim.dimension]?.name,
+        glyph: DIMENSIONS[dim.dimension]?.glyph,
+        severity: "critical",
+        reason: "dimension becomes empty",
+      });
+    }
+  }
+
+  // Check which relations would be lost
+  const orphanedConcepts: string[] = [];
+  for (const r of relations) {
+    // Would the neighbor become isolated?
+    const otherRels = await sql(
+      `SELECT COUNT(*) as count FROM relations WHERE (from_id = $1 OR to_id = $1) AND from_id != $2 AND to_id != $2`,
+      [r.id, noun.id]
+    );
+    if (parseInt(otherRels[0].count) === 0) {
+      orphanedConcepts.push(r.label);
+    }
+  }
+
+  const glyph = getGlyph(nounLabel, noun.type);
+  return {
+    removed: nounLabel,
+    glyph,
+    relations_lost: relations.length,
+    dimensions_affected: affectedDims.map((d: any) => d.dimension),
+    breakages,
+    orphaned_concepts: orphanedConcepts,
+    H1: breakages.length > 0 ? 1 : 0,
+    ideagram: `${glyph} ⊖ → [${breakages.map((b: any) => `${b.glyph}✗`).join(" ")}] ${breakages.length > 0 ? "H¹≠0" : "H¹=0"}`,
+  };
+}
+
+// ============================================================
+// DOCUMENT INTELLIGENCE ANALYSIS
+// Measure the cognitive density of any text.
+// How many concepts? How novel? How connected? What dimensions?
+// ============================================================
+
+async function analyzeDocumentIntelligence(text: string, source?: string): Promise<any> {
+  const start = Date.now();
+  const words = extractNouns(text);
+
+  // Find which concepts are known vs novel
+  const known: any[] = [];
+  const novel: string[] = [];
+  for (const word of words) {
+    const noun = await findNoun(word);
+    if (noun) {
+      known.push(noun);
+      await trackUsage(noun.id);
+    } else {
+      novel.push(word);
+    }
+  }
+
+  // Learn novel concepts
+  const newConcepts: any[] = [];
+  for (const word of novel) {
+    const noun = await upsertNoun(word);
+    if (noun) newConcepts.push(noun);
+  }
+
+  // Extract and create relations from the text
+  const patterns = [
+    { regex: /(\w+)\s+is\s+(?:a|an)\s+(\w+)/gi, type: "is_a" },
+    { regex: /(\w+)\s+causes?\s+(\w+)/gi, type: "causes" },
+    { regex: /(\w+)\s+requires?\s+(\w+)/gi, type: "requires" },
+    { regex: /(\w+)\s+produces?\s+(\w+)/gi, type: "produces" },
+    { regex: /(\w+)\s+contains?\s+(\w+)/gi, type: "contains" },
+    { regex: /(\w+)\s+(?:is\s+)?part\s+of\s+(\w+)/gi, type: "part_of" },
+    { regex: /(\w+)\s+depends?\s+on\s+(\w+)/gi, type: "depends_on" },
+    { regex: /(\w+)\s+leads?\s+to\s+(\w+)/gi, type: "leads_to" },
+    { regex: /(\w+)\s+(?:is\s+)?made\s+of\s+(\w+)/gi, type: "composed_of" },
+  ];
+
+  let connectionsCreated = 0;
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.regex.exec(text)) !== null) {
+      const subj = match[1];
+      const obj = match[2];
+      if (subj && obj && subj.length > 1 && obj.length > 1 && !STOP_WORDS.has(subj.toLowerCase()) && !STOP_WORDS.has(obj.toLowerCase())) {
+        const fromNoun = await upsertNoun(subj);
+        const toNoun = await upsertNoun(obj);
+        if (fromNoun && toNoun) {
+          await upsertRelation(fromNoun.id, toNoun.id, pattern.type, 0.7, source || "document");
+          connectionsCreated++;
+        }
+      }
+    }
+  }
+
+  // Compute dimensional coverage of found concepts
+  const agentId = await getEngineAgentId();
+  const dimCoverage = new Set<number>();
+  for (const noun of known) {
+    const spheres = await sql(
+      `SELECT dimension FROM concept_spheres WHERE noun_id = $1 AND agent_id = $2`,
+      [noun.id, agentId]
+    );
+    for (const s of spheres) dimCoverage.add(s.dimension);
+  }
+
+  // Compute cognitive density of document
+  const totalConcepts = known.length + novel.length;
+  const compoundDensity = totalConcepts > 0 ? known.length / totalConcepts : 0;
+  const tokenCount = text.split(/\s+/).length;
+  const durationMs = Date.now() - start;
+
+  // Intelligence score = concepts × connectivity × dimensional span × (1 + novelty_ratio)
+  const noveltyRatio = totalConcepts > 0 ? novel.length / totalConcepts : 0;
+  const dimSpan = dimCoverage.size / 8;
+  const connDensity = totalConcepts > 1 ? connectionsCreated / (totalConcepts * (totalConcepts - 1) / 2) : 0;
+  const intelligenceScore = totalConcepts * (1 + connDensity) * (1 + dimSpan) * (1 + noveltyRatio);
+  const utilityPerToken = tokenCount > 0 ? intelligenceScore / tokenCount : 0;
+  const utilityPerSecond = durationMs > 0 ? intelligenceScore / (durationMs / 1000) : 0;
+
+  const conceptGlyphs = known.slice(0, 5).map((n: any) => getGlyph(n.label, n.type));
+
+  return {
+    concepts_found: totalConcepts,
+    known_concepts: known.length,
+    novel_concepts: novel.length,
+    connections_created: connectionsCreated,
+    compound_density: Math.round(compoundDensity * 100) / 100,
+    dimensional_coverage: Array.from(dimCoverage).sort(),
+    dimensional_span: Math.round(dimSpan * 1000) / 1000,
+    intelligence_score: Math.round(intelligenceScore * 100) / 100,
+    utility: Math.round(intelligenceScore * 100) / 100,
+    utility_per_token: Math.round(utilityPerToken * 1000) / 1000,
+    utility_per_second: Math.round(utilityPerSecond * 100) / 100,
+    tokens: tokenCount,
+    duration_ms: durationMs,
+    source: source || "anonymous",
+    known: known.map((n: any) => n.label),
+    novel,
+    ideagram: `📄 [${conceptGlyphs.join("")}] ρ=${Math.round(compoundDensity * 100) / 100} ν=${Math.round(noveltyRatio * 100) / 100} U=${Math.round(intelligenceScore * 10) / 10} U/T=${Math.round(utilityPerSecond * 10) / 10}`,
+  };
+}
+
+// ============================================================
+// COMPUTE ROUTER — Logic Gates as Functions
+// Each math system is a callable function. The orchestrator
+// reads the query and routes through the right gates.
+// ============================================================
+
+type ComputeGate = "classical" | "sheaf" | "filter" | "nerve" | "fractal" | "curiosity" | "quantum";
+
+interface ComputeResult {
+  gate: ComputeGate;
+  result: any;
+  duration_ms: number;
+}
+
+/** Classical gate: deterministic graph traversal, BFS, Boolean inference */
+async function gateClassical(query: string, nouns: string[]): Promise<any> {
+  const results: any[] = [];
+
+  // BFS from each known noun
+  for (const label of nouns) {
+    const noun = await findNoun(label);
+    if (!noun) continue;
+    const neighbors = await getNeighbors(noun.id);
+    results.push({
+      noun: label,
+      glyph: getGlyph(label, noun.type),
+      connections: neighbors.length,
+      neighbors: neighbors.slice(0, 5).map((n: any) => ({
+        label: n.label,
+        glyph: getGlyph(n.label, n.noun_type),
+        relation: n.relation_type,
+        direction: n.direction,
+        weight: n.weight,
+      })),
+    });
+  }
+
+  // If two nouns, find path between them
+  let path = null;
+  if (nouns.length >= 2) {
+    const pathResult = await findPath(nouns[0], nouns[1]);
+    if (pathResult) {
+      path = {
+        from: nouns[0],
+        to: nouns[1],
+        steps: pathResult.length,
+        path: pathResult,
+        formula: await buildFormulaPath(nouns[0], nouns[1]),
+      };
+    }
+  }
+
+  return { gate: "classical", concepts: results, path };
+}
+
+/** Sheaf gate: local→global extension, restriction maps, cohomology */
+async function gateSheaf(query: string, nouns: string[]): Promise<any> {
+  const sections: any[] = [];
+  const obstructions: any[] = [];
+
+  for (const label of nouns) {
+    const section = await computeSheafSection(label);
+    if (section) {
+      sections.push(section);
+      if (!section.is_global) {
+        const obs = await checkObstruction(label);
+        if (obs) obstructions.push(obs);
+      }
+    }
+  }
+
+  const globals = sections.filter(s => s.is_global);
+  const nonGlobals = sections.filter(s => !s.is_global);
+
+  return {
+    gate: "sheaf",
+    total_sections: sections.length,
+    global_count: globals.length,
+    obstructed_count: nonGlobals.length,
+    sections: sections.map(s => ({
+      noun: s.noun,
+      glyph: s.glyph,
+      is_global: s.is_global,
+      H1: s.cohomology.H1,
+      dimensions: s.support,
+    })),
+    obstructions,
+    coherent: obstructions.length === 0,
+  };
+}
+
+/** Filter gate: apply Grothendieck topology, return filtered view */
+async function gateFilter(query: string, nouns: string[], filterSpec?: FilterSpec): Promise<any> {
+  // If no explicit filter, auto-detect from query context
+  if (!filterSpec) {
+    // Build a filter from the query's dimension hints
+    const dims: number[] = [];
+    const lower = query.toLowerCase();
+    if (lower.includes("spatial") || lower.includes("physical") || lower.includes("space")) dims.push(1);
+    if (lower.includes("linguistic") || lower.includes("language") || lower.includes("word")) dims.push(2);
+    if (lower.includes("logic") || lower.includes("math") || lower.includes("formal")) dims.push(3);
+    if (lower.includes("body") || lower.includes("kinesthetic") || lower.includes("movement")) dims.push(4);
+    if (lower.includes("music") || lower.includes("rhythm") || lower.includes("sound")) dims.push(5);
+    if (lower.includes("social") || lower.includes("interpersonal") || lower.includes("people")) dims.push(6);
+    if (lower.includes("self") || lower.includes("intrapersonal") || lower.includes("reflect")) dims.push(7);
+    if (lower.includes("nature") || lower.includes("natural") || lower.includes("biology")) dims.push(8);
+
+    filterSpec = dims.length > 0 ? { dimensions: dims } : {};
+  }
+
+  return applyFilter(filterSpec);
+}
+
+/** Nerve gate: simplicial complex operations, Betti numbers, structure */
+async function gateNerve(query: string, nouns: string[]): Promise<any> {
+  const nerve = await computeNerve();
+  const diagnostics = await computeBlobDiagnostics();
+
+  return {
+    gate: "nerve",
+    ...nerve,
+    diagnostics: {
+      fill_ratio: diagnostics.fill_ratio,
+      nexus_index: diagnostics.nexus_index,
+      fragmentation: diagnostics.fragmentation,
+    },
+  };
+}
+
+/** Fractal gate: self-similarity, complexity measurement */
+async function gateFractal(query: string, nouns: string[]): Promise<any> {
+  const agentId = await getEngineAgentId();
+
+  // Compute Hausdorff-like dimension estimate
+  // Using box-counting approximation: at different "scales" (link_count thresholds),
+  // how many concepts survive?
+  const scales: { threshold: number; count: number }[] = [];
+  for (const threshold of [0, 1, 2, 3, 5, 8, 13]) {
+    const count = await sql(
+      `SELECT COUNT(DISTINCT noun_id) as count FROM concept_spheres cs
+       JOIN nouns n ON n.id = cs.noun_id
+       WHERE cs.agent_id = $1 AND n.link_count >= $2`,
+      [agentId, threshold]
+    );
+    scales.push({ threshold, count: parseInt(count[0].count) });
+  }
+
+  // Estimate fractal dimension from log-log slope
+  const logData = scales
+    .filter(s => s.count > 0 && s.threshold > 0)
+    .map(s => ({ logScale: Math.log(s.threshold), logCount: Math.log(s.count) }));
+
+  let fractalDim = 0;
+  if (logData.length >= 2) {
+    const n = logData.length;
+    const sumX = logData.reduce((s, d) => s + d.logScale, 0);
+    const sumY = logData.reduce((s, d) => s + d.logCount, 0);
+    const sumXY = logData.reduce((s, d) => s + d.logScale * d.logCount, 0);
+    const sumXX = logData.reduce((s, d) => s + d.logScale * d.logScale, 0);
+    const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+    fractalDim = Math.abs(slope); // Hausdorff dimension estimate
+  }
+
+  // Per-concept complexity: how many dimensions × relations = complexity proxy
+  const conceptComplexity: any[] = [];
+  for (const label of nouns) {
+    const noun = await findNoun(label);
+    if (!noun) continue;
+    const support = await computeSupport(label);
+    if (!support) continue;
+    const complexity = support.dimensions.length * (noun.link_count || 1);
+    conceptComplexity.push({
+      noun: label,
+      glyph: getGlyph(label, noun.type),
+      dimensions: support.dimensions.length,
+      links: noun.link_count,
+      complexity,
+    });
+  }
+
+  return {
+    gate: "fractal",
+    hausdorff_dimension: Math.round(fractalDim * 1000) / 1000,
+    box_counting: scales,
+    concept_complexity: conceptComplexity,
+    self_similarity: fractalDim > 0.5 ? "detected" : "weak",
+    ideagram: `🌀 D_H=${Math.round(fractalDim * 100) / 100}`,
+  };
+}
+
+/** Curiosity gate: find gaps, plan exploration, CCI scoring */
+async function gateCuriosity(query: string, nouns: string[]): Promise<any> {
+  const agentId = await getEngineAgentId();
+
+  // Find dimensions with fewest concepts (biggest gaps)
+  const dimCounts: { dimension: number; count: number; name: string; glyph: string }[] = [];
+  for (let d = 1; d <= 8; d++) {
+    const count = await sql(
+      `SELECT COUNT(*) as count FROM concept_spheres WHERE dimension = $1 AND agent_id = $2`,
+      [d, agentId]
+    );
+    dimCounts.push({
+      dimension: d,
+      count: parseInt(count[0].count),
+      name: DIMENSIONS[d]?.name || "",
+      glyph: DIMENSIONS[d]?.glyph || "",
+    });
+  }
+  dimCounts.sort((a, b) => a.count - b.count);
+
+  // Find concepts with lowest usage (least explored)
+  const leastExplored = await sql(
+    `SELECT n.label, n.type, COALESCE(n.usage_count, 0) as usage_count, n.link_count
+     FROM nouns n
+     WHERE n.id IN (SELECT DISTINCT noun_id FROM concept_spheres WHERE agent_id = $1)
+     ORDER BY COALESCE(n.usage_count, 0) ASC, n.link_count ASC
+     LIMIT 10`,
+    [agentId]
+  );
+
+  // Find concepts with fewest relations (most isolated)
+  const mostIsolated = await sql(
+    `SELECT n.label, n.type, n.link_count
+     FROM nouns n
+     WHERE n.id IN (SELECT DISTINCT noun_id FROM concept_spheres WHERE agent_id = $1)
+     AND n.link_count <= 1
+     ORDER BY n.link_count ASC
+     LIMIT 10`,
+    [agentId]
+  );
+
+  // CCI (Cognitive Curiosity Index): gaps × isolation × novelty potential
+  const totalConcepts = await sql("SELECT COUNT(*) as count FROM nouns");
+  const totalN = parseInt(totalConcepts[0].count);
+  const emptyDims = dimCounts.filter(d => d.count === 0).length;
+  const isolatedRatio = mostIsolated.length / Math.max(totalN, 1);
+  const cci = (emptyDims / 8 + isolatedRatio) * 50; // 0-100 scale
+
+  return {
+    gate: "curiosity",
+    cci: Math.round(cci * 10) / 10,
+    dimensional_gaps: dimCounts.filter(d => d.count <= 2),
+    least_explored: leastExplored.map((c: any) => ({
+      label: c.label,
+      glyph: getGlyph(c.label, c.type),
+      usage: c.usage_count,
+      links: c.link_count,
+    })),
+    most_isolated: mostIsolated.map((c: any) => ({
+      label: c.label,
+      glyph: getGlyph(c.label, c.type),
+      links: c.link_count,
+    })),
+    exploration_plan: dimCounts.filter(d => d.count <= 2).map(d => ({
+      dimension: d.dimension,
+      name: d.name,
+      glyph: d.glyph,
+      suggestion: `Explore ${d.name.toLowerCase()} intelligence — only ${d.count} concepts here`,
+    })),
+    ideagram: `🔍 CCI=${Math.round(cci)} gaps=[${dimCounts.filter(d => d.count <= 2).map(d => d.glyph).join("")}]`,
+  };
+}
+
+/** Quantum gate: superposition across dimensions, interference patterns */
+async function gateQuantum(query: string, nouns: string[]): Promise<any> {
+  // A concept in multiple dimensions is "in superposition" until observed (filtered)
+  const superpositions: any[] = [];
+
+  for (const label of nouns) {
+    const support = await computeSupport(label);
+    if (!support || support.dimensions.length <= 1) continue;
+
+    // The concept exists in multiple dimensions simultaneously
+    // "Observing" = applying a filter that selects one dimension
+    const dimStates = support.dimensions.map((d: any) => ({
+      dimension: d.dimension,
+      name: d.name,
+      glyph: d.glyph,
+      amplitude: d.density, // density = probability amplitude
+      radius: d.radius,
+    }));
+
+    // Compute interference: do dimensions reinforce or cancel?
+    // Reinforcement = similar density across dims (constructive)
+    // Cancellation = wildly different density (destructive)
+    const densities = dimStates.map((d: any) => d.amplitude);
+    const mean = densities.reduce((s: number, d: number) => s + d, 0) / densities.length;
+    const variance = densities.reduce((s: number, d: number) => s + (d - mean) ** 2, 0) / densities.length;
+    const interference = variance < 0.5 ? "constructive" : variance < 2 ? "mixed" : "destructive";
+
+    superpositions.push({
+      noun: label,
+      glyph: getGlyph(label, support.type),
+      dimensions: dimStates,
+      interference,
+      entanglement: support.dimensions.length,
+      collapse_options: dimStates.map((d: any) => ({
+        observe_dimension: d.dimension,
+        glyph: d.glyph,
+        amplitude: d.amplitude,
+      })),
+    });
+  }
+
+  return {
+    gate: "quantum",
+    superpositions,
+    total_entangled: superpositions.length,
+    ideagram: superpositions.map(s => `${s.glyph}⟨${s.dimensions.map((d: any) => d.glyph).join("|")}⟩`).join(" "),
+  };
+}
+
+/** Detect which compute gates to use for a query */
+function detectComputeIntent(query: string): ComputeGate[] {
+  const lower = query.toLowerCase();
+  const gates: ComputeGate[] = [];
+
+  // Pattern matching for gate selection
+  if (lower.match(/what\s+is|define|look\s*up|find|search|who\s+is|where\s+is/)) gates.push("classical");
+  if (lower.match(/relat|connect|between|path|link|how\s+does.*relate/)) gates.push("classical", "nerve");
+  if (lower.match(/what\s+if|without|remove|hypothetical|would.*happen/)) gates.push("filter", "sheaf");
+  if (lower.match(/should\s+i\s+learn|gap|missing|explore|what.*next|curious/)) gates.push("curiosity", "nerve", "fractal");
+  if (lower.match(/consistent|coherent|contradict|obstruct/)) gates.push("sheaf");
+  if (lower.match(/through.*lens|filter|perspective|context|dimension.*view/)) gates.push("filter");
+  if (lower.match(/complex|fractal|self-similar|scale|hausdorff/)) gates.push("fractal", "nerve");
+  if (lower.match(/multiple.*ways|superposition|across.*dimensions|simultaneously/)) gates.push("quantum");
+  if (lower.match(/predict|evolve|trajectory|future|what.*follows/)) gates.push("sheaf", "classical");
+  if (lower.match(/measure|intelligence|density|utility|metric/)) gates.push("nerve", "fractal");
+
+  // Default: classical + sheaf
+  if (gates.length === 0) gates.push("classical", "sheaf");
+
+  // Deduplicate
+  return [...new Set(gates)];
+}
+
+/** The orchestrator: parse → route → compute → compose → respond */
+async function computeOrchestrator(query: string, filterSpec?: FilterSpec, sessionId?: string): Promise<any> {
+  const start = Date.now();
+
+  // 1. Check cache
+  const cacheKey = `compute:${Buffer.from(query).toString("base64").slice(0, 40)}`;
+  const cached = await cacheGet(cacheKey);
+  if (cached) {
+    return { ...JSON.parse(cached), from_cache: true };
+  }
+
+  // 2. Parse: extract nouns and detect intent
+  const nouns = extractNouns(query);
+  const gates = detectComputeIntent(query);
+
+  // 3. Load working memory from DragonflyDB
+  let workingMemory: any = null;
+  if (sessionId) {
+    const wmRaw = await cacheGet(`wm:${sessionId}`);
+    workingMemory = wmRaw ? JSON.parse(wmRaw) : { active_nouns: [], history: [] };
+    // Add current nouns to working memory
+    workingMemory.active_nouns = [...new Set([...workingMemory.active_nouns, ...nouns])].slice(-20);
+    workingMemory.history.push({ query, timestamp: Date.now() });
+    workingMemory.history = workingMemory.history.slice(-10);
+  }
+
+  // 4. Execute each gate (parallel where possible)
+  const gateResults: ComputeResult[] = [];
+  const gatePromises = gates.map(async (gate) => {
+    const gateStart = Date.now();
+    let result: any;
+    switch (gate) {
+      case "classical": result = await gateClassical(query, nouns); break;
+      case "sheaf": result = await gateSheaf(query, nouns); break;
+      case "filter": result = await gateFilter(query, nouns, filterSpec); break;
+      case "nerve": result = await gateNerve(query, nouns); break;
+      case "fractal": result = await gateFractal(query, nouns); break;
+      case "curiosity": result = await gateCuriosity(query, nouns); break;
+      case "quantum": result = await gateQuantum(query, nouns); break;
+    }
+    return { gate, result, duration_ms: Date.now() - gateStart };
+  });
+
+  const results = await Promise.all(gatePromises);
+  gateResults.push(...results);
+
+  // 5. Compose results
+  const composed = composeGateResults(gateResults, query, nouns);
+
+  // 6. Update working memory
+  if (sessionId && workingMemory) {
+    await cacheSet(`wm:${sessionId}`, JSON.stringify(workingMemory), 3600); // 1 hour TTL
+  }
+
+  // 7. Cache the result
+  const totalDuration = Date.now() - start;
+  const finalResult = {
+    query,
+    nouns_detected: nouns,
+    gates_used: gates,
+    gate_results: gateResults,
+    composed,
+    duration_ms: totalDuration,
+    session: sessionId || null,
+  };
+
+  await cacheSet(cacheKey, JSON.stringify(finalResult), 60);
+
+  return finalResult;
+}
+
+/** Compose results from multiple gates into a coherent response */
+function composeGateResults(results: ComputeResult[], query: string, nouns: string[]): any {
+  // Build ideagram from all gate outputs
+  const ideagrams: string[] = [];
+  let summary = "";
+  let coherent = true;
+
+  for (const r of results) {
+    switch (r.gate) {
+      case "classical":
+        if (r.result.path) {
+          ideagrams.push(r.result.path.formula?.glyph_formula || "");
+          summary += `Path found: ${r.result.path.from} → ${r.result.path.to} (${r.result.path.steps} steps). `;
+        }
+        if (r.result.concepts?.length > 0) {
+          summary += `${r.result.concepts.length} concepts found with ${r.result.concepts.reduce((s: number, c: any) => s + c.connections, 0)} total connections. `;
+        }
+        break;
+
+      case "sheaf":
+        if (r.result.obstructed_count > 0) {
+          coherent = false;
+          summary += `⚠️ ${r.result.obstructed_count} concepts have dimensional incoherence (H¹≠0). `;
+          ideagrams.push(r.result.obstructions.map((o: any) => o.ideagram).join(" "));
+        } else {
+          summary += `All ${r.result.global_count} concepts are globally coherent (H¹=0). `;
+        }
+        break;
+
+      case "filter":
+        if (r.result.surviving_concepts !== undefined) {
+          summary += `Filter: ${r.result.surviving_concepts} concepts survive, ${r.result.killed_concepts} killed. `;
+          ideagrams.push(r.result.ideagram || "");
+        }
+        break;
+
+      case "nerve":
+        if (r.result.betti) {
+          summary += `Nerve: β₀=${r.result.betti.b0} β₁=${r.result.betti.b1}, span=${Math.round((r.result.dimensional_span || 0) * 100)}%. `;
+        }
+        break;
+
+      case "fractal":
+        if (r.result.hausdorff_dimension) {
+          summary += `Fractal dimension: D_H=${r.result.hausdorff_dimension}. `;
+          ideagrams.push(r.result.ideagram || "");
+        }
+        break;
+
+      case "curiosity":
+        if (r.result.cci !== undefined) {
+          summary += `Curiosity index: ${r.result.cci}/100. `;
+          if (r.result.dimensional_gaps?.length > 0) {
+            summary += `Gaps in: ${r.result.dimensional_gaps.map((g: any) => g.name).join(", ")}. `;
+          }
+          ideagrams.push(r.result.ideagram || "");
+        }
+        break;
+
+      case "quantum":
+        if (r.result.superpositions?.length > 0) {
+          summary += `${r.result.total_entangled} concepts in dimensional superposition. `;
+          ideagrams.push(r.result.ideagram || "");
+        }
+        break;
+    }
+  }
+
+  return {
+    summary: summary.trim(),
+    coherent,
+    ideagram: ideagrams.filter(i => i).join("  "),
+    gate_count: results.length,
+    total_duration_ms: results.reduce((s, r) => s + r.duration_ms, 0),
+  };
+}
+
+// ============================================================
+// PHASE PREDICTION — Trajectory via sheaf extension
+// Given a set of concepts (state), predict what comes next
+// by extending the sheaf section to unexplored simplices.
+// ============================================================
+
+async function predictPhase(nounLabels: string[], steps: number = 3): Promise<any> {
+  const agentId = await getEngineAgentId();
+
+  // Get the current state: which concepts and their dimensional positions
+  const state: any[] = [];
+  for (const label of nounLabels) {
+    const support = await computeSupport(label);
+    if (support) state.push(support);
+  }
+
+  if (state.length === 0) return { error: "no known concepts in state" };
+
+  // Find the dimensional footprint of the current state
+  const activeDims = new Set<number>();
+  for (const s of state) {
+    for (const d of s.dimensions) activeDims.add(d.dimension);
+  }
+
+  // Predict: find concepts that share dimensions but aren't in the state
+  const stateLabels = new Set(nounLabels.map(l => l.toLowerCase()));
+  const predictions: any[] = [];
+
+  // Strategy 1: Sheaf extension — find concepts in the same simplices
+  for (const s of state) {
+    for (const dim of s.dimensions) {
+      const cohabitants = await sql(
+        `SELECT n.label, n.type, cs.radius, cs.density, n.link_count
+         FROM concept_spheres cs
+         JOIN nouns n ON n.id = cs.noun_id
+         WHERE cs.dimension = $1 AND cs.agent_id = $2 AND LOWER(n.label) != ALL($3)
+         ORDER BY cs.density DESC LIMIT $4`,
+        [dim.dimension, agentId, Array.from(stateLabels), steps]
+      );
+      for (const c of cohabitants) {
+        if (!predictions.find((p: any) => p.label === c.label)) {
+          predictions.push({
+            label: c.label,
+            glyph: getGlyph(c.label, c.type),
+            type: c.type,
+            predicted_via: `sheaf extension from ${s.noun} in dim ${dim.dimension} (${dim.name})`,
+            dimension: dim.dimension,
+            dimension_glyph: dim.glyph,
+            confidence: c.density / 5, // normalize to 0-1
+            link_count: c.link_count,
+          });
+        }
+      }
+    }
+  }
+
+  // Strategy 2: Relation-based prediction — follow outgoing relations
+  for (const label of nounLabels) {
+    const noun = await findNoun(label);
+    if (!noun) continue;
+    const neighbors = await getNeighbors(noun.id);
+    for (const n of neighbors) {
+      if (!stateLabels.has(n.label.toLowerCase()) && !predictions.find((p: any) => p.label === n.label)) {
+        predictions.push({
+          label: n.label,
+          glyph: getGlyph(n.label, n.noun_type),
+          type: n.noun_type,
+          predicted_via: `${n.relation_type} from ${label}`,
+          relation: n.relation_type,
+          confidence: Math.min(1, n.weight / 2),
+          link_count: n.link_count,
+        });
+      }
+    }
+  }
+
+  // Sort by confidence and take top N
+  predictions.sort((a, b) => b.confidence - a.confidence);
+  const topPredictions = predictions.slice(0, steps * 3);
+
+  // Check coherence of the predicted extension
+  const extendedLabels = [...nounLabels, ...topPredictions.slice(0, steps).map((p: any) => p.label)];
+  const extendedSections: any[] = [];
+  for (const label of extendedLabels) {
+    const section = await computeSheafSection(label);
+    if (section) extendedSections.push(section);
+  }
+  const allGlobal = extendedSections.every(s => s.is_global);
+
+  return {
+    state: state.map(s => ({ noun: s.noun, glyph: s.glyph, dimensions: s.support })),
+    active_dimensions: Array.from(activeDims).sort(),
+    predictions: topPredictions,
+    top_prediction: topPredictions[0] || null,
+    extension_coherent: allGlobal,
+    H1: allGlobal ? 0 : 1,
+    ideagram: `${state.map(s => s.glyph).join("")} ⟹ ${topPredictions.slice(0, steps).map((p: any) => p.glyph).join("")} ${allGlobal ? "H¹=0" : "H¹≠0"}`,
+  };
+}
+
+// ============================================================
+// WORKING MEMORY MANAGEMENT
+// ============================================================
+
+async function getWorkingMemory(sessionId: string): Promise<any> {
+  const raw = await cacheGet(`wm:${sessionId}`);
+  return raw ? JSON.parse(raw) : { active_nouns: [], history: [], filters: [], created_at: Date.now() };
+}
+
+async function setWorkingMemory(sessionId: string, memory: any): Promise<void> {
+  await cacheSet(`wm:${sessionId}`, JSON.stringify(memory), 3600);
+}
+
+// ============================================================
 // HTTP SERVER
 // ============================================================
 
@@ -1801,6 +2748,224 @@ const server = Bun.serve({
         return json({ count: agents.length, agents });
       }
 
+      // ============================================================
+      // FILTER ENDPOINTS — Grothendieck topologies
+      // ============================================================
+
+      // ── Filter: List all saved filters ──
+      if (path === "/filter" && req.method === "GET") {
+        const filters = await sql("SELECT * FROM filters ORDER BY created_at DESC");
+        return json({ count: filters.length, filters });
+      }
+
+      // ── Filter: Create/update a filter ──
+      if (path === "/filter" && req.method === "POST") {
+        const body = await req.json();
+        if (!body.name || !body.spec) return json({ error: "name and spec required" }, 400);
+        const result = await sql(
+          `INSERT INTO filters (name, description, glyph, spec, topology, created_at)
+           VALUES ($1, $2, $3, $4, $5, NOW())
+           ON CONFLICT (name) DO UPDATE SET description = $2, glyph = $3, spec = $4, topology = $5
+           RETURNING *`,
+          [body.name, body.description || null, body.glyph || "🔬",
+           JSON.stringify(body.spec), body.topology ? JSON.stringify(body.topology) : null]
+        );
+        return json({ created: result[0] });
+      }
+
+      // ── Filter: Get current effective filter chain ──
+      if (path === "/filter/current") {
+        const filters = await sql("SELECT name, glyph, spec FROM filters ORDER BY created_at");
+        return json({
+          chain: filters,
+          ideagram: filters.map((f: any) => f.glyph).join(" ∘ ") || "∅ (no filters)",
+        });
+      }
+
+      // ── Filter: Apply a filter ──
+      if (path === "/filter/apply" && req.method === "POST") {
+        const body = await req.json();
+        // Can pass a filter name or inline spec
+        let spec: FilterSpec;
+        if (body.name) {
+          const rows = await sql("SELECT spec FROM filters WHERE name = $1", [body.name]);
+          if (rows.length === 0) return json({ error: "filter not found: " + body.name }, 404);
+          spec = rows[0].spec;
+        } else if (body.spec) {
+          spec = body.spec;
+        } else {
+          return json({ error: "name or spec required" }, 400);
+        }
+        const result = await applyFilter(spec);
+        return json(result);
+      }
+
+      // ── Filter: Kernel — what the current filter kills ──
+      if (path === "/filter/kernel") {
+        const filterName = url.searchParams.get("name");
+        let spec: FilterSpec = {};
+        if (filterName) {
+          const rows = await sql("SELECT spec FROM filters WHERE name = $1", [filterName]);
+          if (rows.length > 0) spec = rows[0].spec;
+        }
+        const result = await applyFilter(spec);
+        return json({
+          filter: filterName || "default",
+          kernel: result.kernel,
+          killed_count: result.killed_concepts,
+          ideagram: `ker(F) = {${result.kernel.slice(0, 5).join(", ")}${result.kernel.length > 5 ? "..." : ""}}`,
+        });
+      }
+
+      // ── Filter: Hypothetical — what if we removed concept X? ──
+      if (path === "/filter/hypothetical" && req.method === "POST") {
+        const body = await req.json();
+        if (!body.remove) return json({ error: "remove param required (noun to remove)" }, 400);
+        const result = await hypotheticalRemoval(body.remove);
+        if (!result) return json({ error: "noun not found: " + body.remove }, 404);
+        return json(result);
+      }
+
+      // ============================================================
+      // DOCUMENT INTELLIGENCE ENDPOINTS
+      // ============================================================
+
+      // ── Intelligence: Analyze document text ──
+      if (path === "/intelligence/document" && req.method === "POST") {
+        const body = await req.json();
+        if (!body.text) return json({ error: "text required" }, 400);
+        const result = await analyzeDocumentIntelligence(body.text, body.source);
+        return json(result);
+      }
+
+      // ============================================================
+      // COMPUTE ROUTER ENDPOINTS
+      // ============================================================
+
+      // ── Compute: Unified compute endpoint ──
+      if (path === "/compute" && req.method === "POST") {
+        const body = await req.json();
+        if (!body.query) return json({ error: "query required" }, 400);
+        const result = await computeOrchestrator(body.query, body.filters, body.session);
+        return json(result);
+      }
+
+      // ── Compute: Individual gates ──
+      if (path === "/compute/classical") {
+        const nouns = (url.searchParams.get("nouns") || "").split(",").filter(Boolean);
+        const result = await gateClassical(url.searchParams.get("query") || "", nouns);
+        return json(result);
+      }
+
+      if (path === "/compute/sheaf") {
+        const nouns = (url.searchParams.get("nouns") || "").split(",").filter(Boolean);
+        const result = await gateSheaf(url.searchParams.get("query") || "", nouns);
+        return json(result);
+      }
+
+      if (path === "/compute/nerve") {
+        const nouns = (url.searchParams.get("nouns") || "").split(",").filter(Boolean);
+        const result = await gateNerve(url.searchParams.get("query") || "", nouns);
+        return json(result);
+      }
+
+      if (path === "/compute/fractal") {
+        const nouns = (url.searchParams.get("nouns") || "").split(",").filter(Boolean);
+        const result = await gateFractal(url.searchParams.get("query") || "", nouns);
+        return json(result);
+      }
+
+      if (path === "/compute/curiosity") {
+        const nouns = (url.searchParams.get("nouns") || "").split(",").filter(Boolean);
+        const result = await gateCuriosity(url.searchParams.get("query") || "", nouns);
+        return json(result);
+      }
+
+      if (path === "/compute/quantum") {
+        const nouns = (url.searchParams.get("nouns") || "").split(",").filter(Boolean);
+        const result = await gateQuantum(url.searchParams.get("query") || "", nouns);
+        return json(result);
+      }
+
+      // ============================================================
+      // PHASE PREDICTION ENDPOINTS
+      // ============================================================
+
+      // ── Phase: Define state, get analysis ──
+      if (path === "/phase" && req.method === "POST") {
+        const body = await req.json();
+        if (!body.nouns || !Array.isArray(body.nouns)) return json({ error: "nouns array required" }, 400);
+        const result = await predictPhase(body.nouns, body.steps || 3);
+        return json(result);
+      }
+
+      // ── Phase: Trajectory prediction ──
+      if (path === "/phase/trajectory") {
+        const nouns = (url.searchParams.get("nouns") || "").split(",").filter(Boolean);
+        const steps = parseInt(url.searchParams.get("steps") || "5");
+        if (nouns.length === 0) return json({ error: "nouns param required" }, 400);
+        const result = await predictPhase(nouns, steps);
+        return json(result);
+      }
+
+      // ── Phase: Predict via sheaf extension ──
+      if (path === "/phase/predict" && req.method === "POST") {
+        const body = await req.json();
+        if (!body.state || !Array.isArray(body.state)) return json({ error: "state array required" }, 400);
+        const result = await predictPhase(body.state, body.steps || 5);
+        return json(result);
+      }
+
+      // ============================================================
+      // WORKING MEMORY ENDPOINTS
+      // ============================================================
+
+      // ── Memory: Get session working memory ──
+      if (path === "/memory" && req.method === "GET") {
+        const sessionId = url.searchParams.get("session");
+        if (!sessionId) return json({ error: "session param required" }, 400);
+        const memory = await getWorkingMemory(sessionId);
+        return json(memory);
+      }
+
+      // ── Memory: Update session working memory ──
+      if (path === "/memory" && req.method === "POST") {
+        const body = await req.json();
+        if (!body.session) return json({ error: "session required" }, 400);
+        const current = await getWorkingMemory(body.session);
+        if (body.active_nouns) current.active_nouns = body.active_nouns;
+        if (body.filters) current.filters = body.filters;
+        await setWorkingMemory(body.session, current);
+        return json({ updated: true, memory: current });
+      }
+
+      // ── Blob: Holes — hole spectrum with classification ──
+      if (path === "/blob/holes") {
+        const agentId = await getEngineAgentId();
+        const holes: any[] = [];
+        // Find dimensions with zero concepts (holes)
+        for (let d = 1; d <= 8; d++) {
+          const count = await sql(
+            `SELECT COUNT(*) as count FROM concept_spheres WHERE dimension = $1 AND agent_id = $2`,
+            [d, agentId]
+          );
+          if (parseInt(count[0].count) === 0) {
+            holes.push({
+              dimension: d,
+              name: DIMENSIONS[d]?.name,
+              glyph: DIMENSIONS[d]?.glyph,
+              type: "filter_hole", // reversible — can be filled by learning
+              severity: "medium",
+            });
+          }
+        }
+        return json({
+          total_holes: holes.length,
+          holes,
+          ideagram: holes.length > 0 ? `🕳️ [${holes.map(h => h.glyph + "✗").join(" ")}]` : "✅ no holes",
+        });
+      }
+
       // ── 404 ──
       return json(
         {
@@ -1829,15 +2994,39 @@ const server = Bun.serve({
             "GET /engine/sheaf/support?noun=X",
             "GET /engine/blob/diagnostics",
             "GET /engine/blob/density?noun=X",
+            "GET /engine/blob/holes",
             "GET /engine/intelligence?noun=X",
             "GET /engine/intelligence/system",
             "GET /engine/intelligence/ranking",
             "GET /engine/intelligence/primes?dim=N",
             "GET /engine/intelligence/compounds?dim=N",
             "GET /engine/intelligence/cloud",
+            "POST /engine/intelligence/document",
             "GET /engine/priority",
             "GET /engine/dimensions",
             "GET /engine/agents",
+            "── Filters (Grothendieck) ──",
+            "GET /engine/filter",
+            "POST /engine/filter",
+            "GET /engine/filter/current",
+            "POST /engine/filter/apply",
+            "GET /engine/filter/kernel",
+            "POST /engine/filter/hypothetical",
+            "── Compute Router ──",
+            "POST /engine/compute",
+            "GET /engine/compute/classical?nouns=X,Y",
+            "GET /engine/compute/sheaf?nouns=X,Y",
+            "GET /engine/compute/nerve?nouns=X,Y",
+            "GET /engine/compute/fractal?nouns=X,Y",
+            "GET /engine/compute/curiosity?nouns=X,Y",
+            "GET /engine/compute/quantum?nouns=X,Y",
+            "── Phase Prediction ──",
+            "POST /engine/phase",
+            "GET /engine/phase/trajectory?nouns=X,Y&steps=N",
+            "POST /engine/phase/predict",
+            "── Working Memory ──",
+            "GET /engine/memory?session=X",
+            "POST /engine/memory",
           ],
         },
         404
