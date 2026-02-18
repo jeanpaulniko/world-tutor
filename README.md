@@ -14,7 +14,7 @@ Uses the Socratic method — guides you to discover answers through questions, n
 - **Multilingual** — responds in whatever language you write
 - **Any subject** — math, science, history, coding, languages
 - **Works on any phone** — PWA, < 200KB, offline support
-- **Free forever** — costs ~$20/month to run for 100+ users
+- **Free forever** — costs ~$10/month to run for 100+ users
 - **Open source** — MIT license, self-host in minutes
 
 ## Quick Start
@@ -24,7 +24,7 @@ git clone https://github.com/jeanpaulniko/world-tutor.git
 cd world-tutor
 npm install
 cp .env.example .env
-# Add your API key to .env (get one free at siliconflow.cn)
+# Add your API key to .env (get one free at console.groq.com — no credit card)
 npm run dev
 # Open http://localhost:5173
 ```
@@ -32,8 +32,8 @@ npm run dev
 ## Self-Host (One Command)
 
 ```bash
-# Get a free API key at https://siliconflow.cn
-export LLM_API_KEY=your-key-here
+# Get a free API key at https://console.groq.com (no credit card needed)
+export LLM_API_KEY=gsk_your-key-here
 npm install && npm run build && npm start
 ```
 
@@ -42,17 +42,17 @@ npm install && npm run build && npm start
 | Item | Monthly Cost |
 |------|-------------|
 | Hosting (Railway) | $5-15 |
-| LLM API (100 users) | $3-5 |
-| **Total** | **~$20/month** |
+| LLM API (100 users) | $1-3 |
+| **Total** | **~$10/month** |
 
-Uses SiliconFlow's Llama 3.1 8B at $0.20 per million tokens — 10x cheaper than OpenAI.
+Default: Groq's Llama 3.1 8B at $0.05/1M tokens with a free tier. Also supports OpenRouter ($0.035/1M), Together AI, or any OpenAI-compatible API.
 
 ## Tech Stack
 
 - **Frontend:** React + TypeScript + Vite (PWA)
 - **Backend:** Express + TypeScript
 - **Database:** SQLite (zero cost, embedded)
-- **LLM:** Any OpenAI-compatible API (default: SiliconFlow)
+- **LLM:** Any OpenAI-compatible API (default: Groq, free tier)
 
 ## Deploy to Railway
 

@@ -3,21 +3,21 @@ import OpenAI from 'openai';
 /**
  * LLM client using OpenAI-compatible API.
  *
- * Supports SiliconFlow, Together, OpenRouter, OpenAI, or any
+ * Supports Groq, Together, OpenRouter, OpenAI, or any
  * OpenAI-compatible endpoint. Just set the env vars.
  *
- * Default: SiliconFlow with Llama 3.1 8B ($0.20/1M tokens)
+ * Default: Groq with Llama 3.1 8B ($0.05/1M tokens, free tier available)
  */
 
-const BASE_URL = process.env.LLM_BASE_URL || 'https://api.siliconflow.cn/v1';
+const BASE_URL = process.env.LLM_BASE_URL || 'https://api.groq.com/openai/v1';
 const API_KEY = process.env.LLM_API_KEY || '';
-const MODEL = process.env.LLM_MODEL || 'meta-llama/Meta-Llama-3.1-8B-Instruct';
+const MODEL = process.env.LLM_MODEL || 'llama-3.1-8b-instant';
 
 if (!API_KEY) {
   console.warn(
     '⚠️  LLM_API_KEY not set. Set it in your environment or .env file.\n' +
-    '   Get a free key at https://siliconflow.cn or use any OpenAI-compatible API.\n' +
-    '   Example: export LLM_API_KEY=sk-xxx'
+    '   Get a free key at https://console.groq.com (no credit card needed)\n' +
+    '   Example: export LLM_API_KEY=gsk_xxx'
   );
 }
 
