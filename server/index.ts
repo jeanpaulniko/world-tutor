@@ -3,7 +3,7 @@ import cors from 'cors';
 import compression from 'compression';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { chatRouter } from './routes/chat.js';
+import { engineChatRouter } from './routes/engine-chat.js';
 import { initDb } from './lib/db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -15,12 +15,17 @@ app.use(cors());
 app.use(compression());
 app.use(express.json());
 
-// API routes
-app.use('/api', chatRouter);
+// API routes — powered by Intelligence Engine (no LLM required)
+app.use('/api', engineChatRouter);
 
 // Health check
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    engine: 'intelligence_engine',
+    llm_required: false,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // Serve static frontend in production
@@ -36,6 +41,7 @@ if (process.env.NODE_ENV === 'production') {
 initDb();
 
 app.listen(PORT, () => {
-  console.log(`World Tutor API running on http://localhost:${PORT}`);
+  console.log(`World Tutor running on http://localhost:${PORT}`);
+  console.log(`Engine: Intelligence Engine (no LLM, no API costs)`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
